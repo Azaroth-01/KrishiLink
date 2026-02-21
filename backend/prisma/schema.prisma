@@ -1,0 +1,62 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+// Enums to standardize roles and produce statuses
+enum Role {
+  FARMER
+  DISTRIBUTOR
+  RETAILER
+  ADMIN
+}
+
+enum ProduceStatus {
+  LISTED
+  IN_ESCROW
+  DELIVERED
+}
+
+// The User table (Linked via their Ethereum Wallet)
+model User {
+  id            String    @id @default(uuid())
+  walletAddress String    @unique
+  role          Role      @default(FARMER)
+  name          String?
+  state         String?   // Useful for MSP comparison by state
+  rating        Float     @default(0.0) // Cached from smart contract for fast UI sorting
+  createdAt     DateTime  @default(now())
+  
+  // A user can have many produce listings
+  produce       Produce[]
+}
+
+// The Produce table (Matches up with the Smart Contract NFT)
+model Produce {
+  id            String        @id @default(uuid())
+  tokenId       Int?          @unique // Assigned after it's minted on the blockchain
+  name          String
+  quantityKg    Float
+  pricePerKg    Float
+  ipfsHash      String?       // IPFS CID for quality certificates/invoices
+  status        ProduceStatus @default(LISTED)
+  mspComparison Boolean       @default(true) // Flag if price is above MSP
+  
+  // Relations
+  farmerId      String
+  farmer        User          @relation(fields: [farmerId], references: [id])
+  
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+}
+
+// Admin controlled Minimum Support Price table
+model MinimumSupportPrice {
+  id          String   @id @default(uuid())
+  cropName    String
+  state       String
+  pricePerKg  Float
+  lastUpdated DateTime @updatedAt
+}
