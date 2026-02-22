@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const { contract } = require('./blockchain');
 require('dotenv').config();
 
 // Prisma v7 Requirements
@@ -24,6 +25,22 @@ app.use(express.json());
 // 1. Health Check
 app.get('/', (req, res) => {
   res.send('AgroTraceability Backend is running!');
+});
+// 1.5 Blockchain Test Route
+app.get('/api/test-blockchain', async (req, res) => {
+  try {
+    // We'll call the 'greeting' function from your Greeter contract 
+    // OR the 'owner' function from AgroTraceability
+    const owner = await contract.owner(); 
+    res.json({ 
+      status: "Success!", 
+      contractOwner: owner,
+      message: "Server is officially talking to the Blockchain."
+    });
+  } catch (error) {
+    console.error("Blockchain Connection Error:", error);
+    res.status(500).json({ error: "Server could not reach the blockchain." });
+  }
 });
 
 // 2. Create a new User (Farmer, Distributor, etc.)

@@ -1,8 +1,12 @@
 import { HardhatUserConfig } from "hardhat/config";
-import "@nomicfoundation/hardhat-toolbox-mocha-ethers";
+import hardhatToolboxMochaEthers from "@nomicfoundation/hardhat-toolbox-mocha-ethers";
 
 const config: HardhatUserConfig = {
-  solidity: "0.8.20", // Matches your OpenZeppelin version
+  solidity: "0.8.24", 
+  paths: {
+    sources: "./contracts", // Explicitly telling Hardhat where to look
+  },
+  plugins:[hardhatToolboxMochaEthers],// Matches your OpenZeppelin version
 };
 
 export default config;
