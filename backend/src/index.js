@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
-const { contract } = require('./blockchain');
+const { ethers } = require('ethers'); // Needed for parsing crypto values
+const { contract, buyerContract } = require('./blockchain'); // Merged perfectly
 require('dotenv').config();
 
 // Prisma v7 Requirements
@@ -42,7 +43,27 @@ app.get('/api/test-blockchain', async (req, res) => {
     res.status(500).json({ error: "Server could not reach the blockchain." });
   }
 });
+// 4. Simple Login (Web 2.5 Auth)
+app.post('/api/login', async (req, res) => {
+  try {
+    const { phone } = req.body;
+    
+    // Find the user by their phone number
+    const user = await prisma.user.findUnique({
+      where: { phone: phone }
+    });
 
+    if (!user) {
+      return res.status(404).json({ error: "User not found. Please check the number." });
+    }
+
+    // Return the user object (including their ID and Role)
+    res.json(user);
+  } catch (error) {
+    console.error("Login Error:", error);
+    res.status(500).json({ error: "Login failed." });
+  }
+});
 // 2. Create a new User (Farmer, Distributor, etc.)
 app.post('/api/users', async (req, res) => {
   try {
@@ -75,20 +96,31 @@ app.post('/api/produce', async (req, res) => {
   try {
     const { name, quantity, price, farmerId } = req.body;
     
-    // We are matching the exact names in your schema.prisma
+    // 1. MINT THE NFT (Blockchain)
+    const metadataUri = `https://krishilink.com/metadata/${name.toLowerCase()}`;
+    const tx = await contract.mintProduce(metadataUri);
+    const receipt = await tx.wait();
+
+    // Extract the TokenID from the event logs
+    const event = receipt.logs.find(log => log.fragment && log.fragment.name === 'ProduceMinted');
+    const mintedTokenId = event ? event.args[0].toString() : null;
+
+    // 2. SAVE TO POSTGRES (Prisma)
     const newProduce = await prisma.produce.create({
       data: {
         name: name,
-        quantity: parseFloat(quantity), // Changed back from quantityKg
-        price: parseFloat(price),       // Changed back from pricePerKg
-        farmerId: farmerId
+        quantity: parseFloat(quantity),
+        price: parseFloat(price),
+        farmerId: farmerId,
+        blockchainTx: receipt.hash, // ✅ Proof of Transaction
+        tokenId: mintedTokenId     // ✅ NFT Identification
       }
     });
     
     res.status(201).json(newProduce);
   } catch (error) {
-    console.error("Prisma Error Details:", error);
-    res.status(500).json({ error: "Failed to create produce listing", details: error.message });
+    console.error("Critical Error during Listing:", error);
+    res.status(500).json({ error: "Failed to sync Blockchain and Database." });
   }
 });
 
@@ -124,23 +156,33 @@ app.post('/api/orders', async (req, res) => {
 });
 
 // Get all orders for a specific farmer
+// 1. FETCH INVENTORY: What the farmer is selling
+app.get('/api/produce/farmer/:farmerId', async (req, res) => {
+  try {
+    const { farmerId } = req.params;
+    const inventory = await prisma.produce.findMany({
+      where: { farmerId: farmerId },
+      orderBy: { createdAt: 'desc' }
+    });
+    res.json(inventory);
+  } catch (error) {
+    res.status(500).json({ error: "Failed to fetch farmer inventory." });
+  }
+});
+
+// 2. FETCH ORDERS: Who is buying the farmer's crops (YOUR EXISTING ROUTE)
 app.get('/api/orders/farmer/:farmerId', async (req, res) => {
   try {
     const { farmerId } = req.params;
-    
-    // Prisma lets us search for orders where the connected 'produce' belongs to this farmer
     const orders = await prisma.order.findMany({
       where: {
-        produce: {
-          farmerId: farmerId
-        }
+        produce: { farmerId: farmerId }
       },
       include: {
-        produce: true, // Brings in the crop details (name, price)
-        buyer: true    // Brings in the wholesaler's details (name, phone)
+        produce: true, 
+        buyer: true    
       }
     });
-    
     res.json(orders);
   } catch (error) {
     console.error("Fetch Orders Error:", error);
@@ -167,29 +209,107 @@ app.put('/api/orders/:orderId/accept', async (req, res) => {
 });
 
 // Get all orders for a specific buyer (Wholesaler/Retailer)
+// Fetch all orders placed by a specific Wholesaler (Buyer)
 app.get('/api/orders/buyer/:buyerId', async (req, res) => {
   try {
     const { buyerId } = req.params;
     
     const orders = await prisma.order.findMany({
-      where: {
-        buyerId: buyerId
-      },
+      where: { buyerId: buyerId },
       include: {
-        // We include the produce details, AND we nest the farmer's details inside it
-        // so the wholesaler knows who to call and where the crop is.
         produce: {
-          include: {
-            farmer: true 
+          include: { 
+            farmer: true // We want the farmer's details to show to the wholesaler
           }
         }
-      }
+      },
+      orderBy: { createdAt: 'desc' }
     });
     
     res.json(orders);
   } catch (error) {
     console.error("Fetch Buyer Orders Error:", error);
     res.status(500).json({ error: "Failed to fetch buyer orders." });
+  }
+});
+
+// 5. Fund Escrow (Wholesaler locks funds in Smart Contract)
+app.post('/api/orders/:orderId/fund', async (req, res) => {
+  try {
+    const { orderId } = req.params;
+
+    // 1. Find the order and the associated NFT Token ID
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: { produce: true }
+    });
+
+    if (!order || !order.produce.tokenId) {
+      return res.status(400).json({ error: "Order not found or Produce has no Token ID." });
+    }
+
+    // 2. WEB 3 MAGIC: Fund the Escrow via the Smart Contract
+    console.log(`Funding Escrow for Token ID: ${order.produce.tokenId}...`);
+    
+    // We send a small amount of mock ETH (e.g., 0.01 ETH) as the escrow value
+    const tx = await buyerContract.fundEscrow(order.produce.tokenId, {
+      value: ethers.parseEther("0.01") 
+    });
+    
+    const receipt = await tx.wait();
+    console.log(`Escrow Funded! Hash: ${receipt.hash}`);
+
+    // 3. Update PostgreSQL status
+    const updatedOrder = await prisma.order.update({
+      where: { id: orderId },
+      data: { status: 'ESCROW_FUNDED' }
+    });
+
+    res.json({ updatedOrder, txHash: receipt.hash });
+  } catch (error) {
+    console.error("Escrow Funding Error:", error);
+    res.status(500).json({ error: "Failed to fund escrow on the blockchain." });
+  }
+});
+// 6. Confirm Delivery & Release Funds (Wholesaler receives the crop)
+app.post('/api/orders/:orderId/confirm', async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { rating } = req.body;
+
+    if (!rating || rating < 1 || rating > 5) {
+      return res.status(400).json({ error: "Please provide a valid rating between 1 and 5." });
+    }
+
+    // 1. Find the order and Token ID
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: { produce: true }
+    });
+
+    if (!order || !order.produce.tokenId) {
+      return res.status(400).json({ error: "Order not found or missing Token ID." });
+    }
+
+    // 2. WEB 3 MAGIC: Call the smart contract to release funds
+    console.log(`Releasing funds for Token ID: ${order.produce.tokenId} with Rating: ${rating}...`);
+    
+    // We use buyerContract because ONLY the buyer is authorized to release the money
+    const tx = await buyerContract.confirmDeliveryAndReleaseFunds(order.produce.tokenId, rating);
+    const receipt = await tx.wait();
+
+    console.log(`Funds Released! Hash: ${receipt.hash}`);
+
+    // 3. Update PostgreSQL status to show the transaction is totally finished
+    const updatedOrder = await prisma.order.update({
+      where: { id: orderId },
+      data: { status: 'DELIVERED' } 
+    });
+
+    res.json({ updatedOrder, txHash: receipt.hash });
+  } catch (error) {
+    console.error("Delivery Confirmation Error:", error);
+    res.status(500).json({ error: "Failed to confirm delivery on the blockchain." });
   }
 });
 // ---------------------------------------------------
