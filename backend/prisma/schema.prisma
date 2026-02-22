@@ -7,10 +7,10 @@ datasource db {
 }
 // Enums to standardize roles and produce statuses
 enum Role {
-  FARMER
-  DISTRIBUTOR
-  RETAILER
   ADMIN
+  FARMER
+  WHOLESALER
+  RETAILER
 }
 
 enum ProduceStatus {
@@ -24,32 +24,38 @@ model User {
   id            String    @id @default(uuid())
   walletAddress String    @unique
   role          Role      @default(FARMER)
-  name          String?
-  state         String?   // Useful for MSP comparison by state
-  rating        Float     @default(0.0) // Cached from smart contract for fast UI sorting
+  name          String
+  phone         String    @unique
+  state         String
+  city          String
+  isVerified    Boolean   @default(false)
   createdAt     DateTime  @default(now())
   
-  // A user can have many produce listings
-  produce       Produce[]
+  // ADD THIS LINE BELOW
+  produce       Produce[] 
+  ordersPlaced  Order[]
 }
 
-// The Produce table (Matches up with the Smart Contract NFT)
+// Ensure your Produce model looks like this (which it likely already does)
 model Produce {
-  id            String        @id @default(uuid())
-  tokenId       Int?          @unique // Assigned after it's minted on the blockchain
-  name          String
-  quantityKg    Float
-  pricePerKg    Float
-  ipfsHash      String?       // IPFS CID for quality certificates/invoices
-  status        ProduceStatus @default(LISTED)
-  mspComparison Boolean       @default(true) // Flag if price is above MSP
-  
-  // Relations
-  farmerId      String
-  farmer        User          @relation(fields: [farmerId], references: [id])
-  
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
+  id          String   @id @default(uuid())
+  name        String
+  quantity    Float
+  price       Float
+  farmerId    String
+  farmer      User     @relation(fields: [farmerId], references: [id])
+  createdAt   DateTime @default(now())
+  orders      Order[]
+}
+
+model Order {
+  id          String   @id @default(uuid())
+  produceId   String
+  produce     Produce  @relation(fields: [produceId], references: [id])
+  buyerId     String
+  buyer       User     @relation(fields: [buyerId], references: [id])
+  status      String   @default("PENDING") // Status can be PENDING, ACCEPTED, or COMPLETED
+  createdAt   DateTime @default(now())
 }
 
 // Admin controlled Minimum Support Price table
