@@ -125,14 +125,39 @@ app.post('/api/produce', async (req, res) => {
 });
 
 // Get all produce for the marketplace
+// Get All Available Produce (Marketplace)
 app.get('/api/produce', async (req, res) => {
   try {
-    const allProduce = await prisma.produce.findMany({
-      include: { farmer: true } // This brings farmer details (like name/city) with the produce
+    const produce = await prisma.produce.findMany({
+      where: {
+        // THE MAGIC: Hide this crop if the farmer has accepted ANY order for it
+        orders: {
+          none: {
+            status: {
+              in: ['ACCEPTED', 'ESCROW_FUNDED', 'DELIVERED']
+            }
+          }
+        }
+      },
+      include: {
+        farmer: {
+          select: {
+            id: true,
+            name: true,
+            city: true,
+            state: true
+          }
+        }
+      },
+      orderBy: {
+        createdAt: 'desc'
+      }
     });
-    res.json(allProduce);
+
+    res.json(produce);
   } catch (error) {
-    res.status(500).json({ error: "Failed to fetch marketplace" });
+    console.error("Marketplace Fetch Error:", error);
+    res.status(500).json({ error: "Failed to fetch marketplace data." });
   }
 });
 
@@ -154,6 +179,8 @@ app.post('/api/orders', async (req, res) => {
     res.status(500).json({ error: "Failed to create order." });
   }
 });
+
+
 
 // Get all orders for a specific farmer
 // 1. FETCH INVENTORY: What the farmer is selling
@@ -312,10 +339,162 @@ app.post('/api/orders/:orderId/confirm', async (req, res) => {
     res.status(500).json({ error: "Failed to confirm delivery on the blockchain." });
   }
 });
+
+
+// 7. Unified Public Profile Route
+// 7. Unified Public Profile Route (WITH BLOCKCHAIN REPUTATION)
+app.get('/api/users/:id/profile', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = await prisma.user.findUnique({
+      where: { id }
+    });
+
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    // ---> NEW: FETCH ON-CHAIN REPUTATION <---
+    let onChainRating = 0;
+    let reviewCount = 0;
+    
+    
+    try {
+      // 1. Get the actual wallet address your Node server is using!
+      const actualWalletAddress = await contract.runner.getAddress();
+      
+      console.log(`Checking DB Fake Wallet: ${user.walletAddress}`);
+      console.log(`Actually querying Blockchain for: ${actualWalletAddress}`);
+
+      // 2. Query the blockchain using the real wallet
+      const rep = await contract.ratings(actualWalletAddress);
+      
+      const fetchedTotalScore = Number(rep[0] || 0);
+      const fetchedReviewCount = Number(rep[1] || 0);
+      
+      console.log(`Found Score: ${fetchedTotalScore}, Reviews: ${fetchedReviewCount}`);
+
+      if (fetchedReviewCount > 0) {
+        onChainRating = parseFloat((fetchedTotalScore / fetchedReviewCount).toFixed(1));
+        reviewCount = fetchedReviewCount;
+      }
+    } catch (chainErr) {
+      console.error("Smart Contract read error for rating:", chainErr.shortMessage || chainErr.message);
+    }
+
+    // Attach the blockchain data to the web2 user object
+    user.onChainRating = onChainRating;
+    user.reviewCount = reviewCount;
+
+    // Fetch Verified History (DELIVERED status only)
+    let history = [];
+    if (user.role === 'FARMER') {
+      history = await prisma.order.findMany({
+        where: {
+          produce: { farmerId: id },
+          status: "DELIVERED"
+        },
+        include: { produce: true, buyer: { select: { name: true, city: true } } },
+        orderBy: { createdAt: 'desc' } // Note: Using createdAt to avoid Prisma schema errors!
+      });
+    } else if (user.role === 'WHOLESALER') {
+      history = await prisma.order.findMany({
+        where: {
+          buyerId: id,
+          status: "DELIVERED"
+        },
+        include: {
+          produce: {
+            include: { farmer: { select: { name: true, city: true } } }
+          }
+        },
+        orderBy: { createdAt: 'desc' } 
+      });
+    }
+
+    res.json({ user, history });
+  } catch (error) {
+    console.error("Fetch Profile Error:", error);
+    res.status(500).json({ error: "Failed to fetch profile." });
+  }
+});
+
+// 8. Farmer Rates the Wholesaler
+app.post('/api/orders/:orderId/rate-buyer', async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { rating } = req.body;
+
+    if (!rating || rating < 1 || rating > 5) {
+      return res.status(400).json({ error: "Invalid rating." });
+    }
+
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: { produce: true }
+    });
+
+    // FIX: Strictly check for null/undefined so Token ID 0 doesn't get blocked!
+    if (!order || order.produce.tokenId === null || order.produce.tokenId === undefined) {
+      return res.status(400).json({ error: "Order or Token ID not found." });
+    }
+
+    console.log(`Farmer is rating Buyer for Token ID: ${order.produce.tokenId}...`);
+    
+    const tx = await contract.rateBuyer(order.produce.tokenId, rating);
+    const receipt = await tx.wait();
+
+    res.json({ success: true, txHash: receipt.hash });
+  } catch (error) {
+    console.error("Rate Buyer Error:", error);
+    res.status(500).json({ error: "Failed to rate buyer. You may have already rated them!" });
+  }
+});
+
+// DELETE LISTED PRODUCE
+app.delete('/api/produce/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Attempt to delete the item from the database
+    await prisma.produce.delete({
+      where: { id: id }
+    });
+
+    res.json({ success: true, message: "Produce delisted successfully." });
+  } catch (error) {
+    console.error("Delete Produce Error:", error);
+    res.status(500).json({ error: "Cannot delist an item that already has active orders." });
+  }
+});
+
+// 9. Public Ledger (Blockchain Explorer) Route
+app.get('/api/ledger', async (req, res) => {
+  try {
+    // Fetch all orders that have blockchain activity
+    const transactions = await prisma.order.findMany({
+      where: {
+        status: { in: ['ESCROW_FUNDED', 'DELIVERED'] }
+      },
+      include: {
+        produce: {
+          include: { 
+            farmer: { select: { name: true, walletAddress: true } } 
+          }
+        },
+        buyer: { select: { name: true, walletAddress: true } }
+      },
+      orderBy: { createdAt: 'desc' } // Sorting by newest first
+    });
+
+    res.json(transactions);
+  } catch (error) {
+    console.error("Ledger Fetch Error:", error);
+    res.status(500).json({ error: "Failed to fetch ledger data." });
+  }
+});
 // ---------------------------------------------------
 // START SERVER
 // ---------------------------------------------------
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`🚀 Server is running on http://localhost:${PORT}`);
+  console.log(` Server is running on http://localhost:${PORT}`);
 });

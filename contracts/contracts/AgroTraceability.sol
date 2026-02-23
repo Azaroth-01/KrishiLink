@@ -13,6 +13,7 @@ contract AgroTraceability is ERC721URIStorage, Ownable {
         uint256 amount;
         bool isFunded;
         bool isDelivered;
+        bool sellerRatedBuyer; // <-- NEW: Prevents review spamming
     }
 
     struct UserRating {
@@ -20,17 +21,17 @@ contract AgroTraceability is ERC721URIStorage, Ownable {
         uint256 reviewCount;
     }
 
-    mapping(uint256 => Escrow) public escrows; // TokenID -> Escrow
+    mapping(uint256 => Escrow) public escrows;
     mapping(address => UserRating) public ratings;
 
     event ProduceMinted(uint256 indexed tokenId, address indexed farmer, string ipfsUri);
     event EscrowFunded(uint256 indexed tokenId, address indexed buyer, uint256 amount);
     event ProduceDelivered(uint256 indexed tokenId);
     event FundsReleased(uint256 indexed tokenId, address indexed seller, uint256 amount);
+    event BuyerRated(uint256 indexed tokenId, address indexed buyer, uint8 rating); // <-- NEW
 
     constructor() ERC721("AgroProduce", "AGRP") Ownable(msg.sender) {}
 
-    // 1. Farmer mints produce NFT (IPFS URI holds certificates)
     function mintProduce(string memory uri) public returns (uint256) {
         uint256 tokenId = _nextTokenId++;
         _mint(msg.sender, tokenId);
@@ -39,7 +40,6 @@ contract AgroTraceability is ERC721URIStorage, Ownable {
         return tokenId;
     }
 
-    // 2. Buyer (Distributor/Retailer) funds the escrow
     function fundEscrow(uint256 tokenId) public payable {
         require(ownerOf(tokenId) != msg.sender, "You cannot buy your own produce");
         require(!escrows[tokenId].isFunded, "Escrow already funded");
@@ -49,13 +49,14 @@ contract AgroTraceability is ERC721URIStorage, Ownable {
             seller: ownerOf(tokenId),
             amount: msg.value,
             isFunded: true,
-            isDelivered: false
+            isDelivered: false,
+            sellerRatedBuyer: false // <-- NEW: Initialize as false
         });
 
         emit EscrowFunded(tokenId, msg.sender, msg.value);
     }
 
-    // 3. Both confirm delivery, funds release, NFT transfers
+    // Buyer rates the Seller when confirming delivery
     function confirmDeliveryAndReleaseFunds(uint256 tokenId, uint8 ratingForSeller) public {
         Escrow storage escrow = escrows[tokenId];
         require(msg.sender == escrow.buyer, "Only buyer can confirm delivery");
@@ -64,13 +65,9 @@ contract AgroTraceability is ERC721URIStorage, Ownable {
 
         escrow.isDelivered = true;
         
-        // Transfer Funds
         payable(escrow.seller).transfer(escrow.amount);
-        
-        // Transfer NFT Ownership
         _transfer(escrow.seller, escrow.buyer, tokenId);
 
-        // Update Rating
         ratings[escrow.seller].totalScore += ratingForSeller;
         ratings[escrow.seller].reviewCount++;
 
@@ -78,9 +75,26 @@ contract AgroTraceability is ERC721URIStorage, Ownable {
         emit FundsReleased(tokenId, escrow.seller, escrow.amount);
     }
 
-    // Helper to view average rating
-    function getAverageRating(address user) public view returns (uint256) {
-        if (ratings[user].reviewCount == 0) return 0;
-        return ratings[user].totalScore / ratings[user].reviewCount;
+    // <-- NEW: Farmer rates the Buyer after the transaction is complete
+    function rateBuyer(uint256 tokenId, uint8 ratingForBuyer) public {
+        Escrow storage escrow = escrows[tokenId];
+        
+        require(msg.sender == escrow.seller, "Only the seller can rate the buyer");
+        require(escrow.isDelivered, "Cannot rate until delivery is confirmed");
+        require(!escrow.sellerRatedBuyer, "You have already rated the buyer for this order");
+        require(ratingForBuyer > 0 && ratingForBuyer <= 5, "Rating must be 1-5");
+
+        escrow.sellerRatedBuyer = true;
+        
+        ratings[escrow.buyer].totalScore += ratingForBuyer;
+        ratings[escrow.buyer].reviewCount++;
+
+        emit BuyerRated(tokenId, escrow.buyer, ratingForBuyer);
+    }
+
+    // <-- UPDATED: Now returns both Average AND Total Reviews so the UI can show "4 Stars (12 Reviews)"
+    function getAverageRating(address user) public view returns (uint256, uint256) {
+        if (ratings[user].reviewCount == 0) return (0, 0);
+        return (ratings[user].totalScore / ratings[user].reviewCount, ratings[user].reviewCount);
     }
 }
