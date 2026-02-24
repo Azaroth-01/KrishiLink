@@ -92,6 +92,7 @@ app.get('/api/users', async (req, res) => {
 
 
 // Add a new produce listing
+// Add a new produce listing
 app.post('/api/produce', async (req, res) => {
   try {
     const { name, quantity, price, farmerId } = req.body;
@@ -101,19 +102,42 @@ app.post('/api/produce', async (req, res) => {
     const tx = await contract.mintProduce(metadataUri);
     const receipt = await tx.wait();
 
-    // Extract the TokenID from the event logs
-    const event = receipt.logs.find(log => log.fragment && log.fragment.name === 'ProduceMinted');
-    const mintedTokenId = event ? event.args[0].toString() : null;
+    let mintedTokenId = null;
 
-    // 2. SAVE TO POSTGRES (Prisma)
+    // 2. EXTRACT THE TOKEN ID (Double-layered Ethers v6 parsing)
+    for (const log of receipt.logs) {
+      // Approach A: Ethers v6 auto-parsed logs
+      if (log.eventName === 'ProduceMinted' || (log.fragment && log.fragment.name === 'ProduceMinted')) {
+        mintedTokenId = log.args[0].toString();
+        break;
+      }
+      // Approach B: Manual ABI parsing fallback
+      try {
+        const parsed = contract.interface.parseLog(log);
+        if (parsed && parsed.name === 'ProduceMinted') {
+          mintedTokenId = parsed.args[0].toString();
+          break;
+        }
+      } catch (e) { /* Ignore irrelevant logs */ }
+    }
+
+    console.log(`[Minting] Extracted Token ID for ${name}:`, mintedTokenId);
+
+    // 3. THE HARD LOCK: Do not save to DB if Token ID is missing!
+    if (mintedTokenId === null) {
+       console.error("Failed to extract Token ID from Blockchain receipt:", receipt);
+       return res.status(500).json({ error: "Minting succeeded on-chain, but backend failed to read the Token ID. Crop was not saved to the marketplace." });
+    }
+
+    // 4. SAVE TO POSTGRES (Prisma)
     const newProduce = await prisma.produce.create({
       data: {
         name: name,
         quantity: parseFloat(quantity),
         price: parseFloat(price),
         farmerId: farmerId,
-        blockchainTx: receipt.hash, // ✅ Proof of Transaction
-        tokenId: mintedTokenId     // ✅ NFT Identification
+        blockchainTx: receipt.hash, 
+        tokenId: mintedTokenId     // GUARANTEED to be a valid number string now!
       }
     });
     
@@ -270,8 +294,13 @@ app.post('/api/orders/:orderId/fund', async (req, res) => {
       where: { id: orderId },
       include: { produce: true }
     });
-
-    if (!order || !order.produce.tokenId) {
+    console.log("================ DEBUGLOG ================");
+    console.log("Order Found:", order ? "Yes" : "No");
+    console.log("Produce Data:", order?.produce);
+    console.log("Token ID is exactly:", order?.produce?.tokenId);
+    console.log("Type of Token ID:", typeof order?.produce?.tokenId);
+    console.log("==========================================");
+    if (!order || order.produce.tokenId === null || order.produce.tokenId === undefined) {
       return res.status(400).json({ error: "Order not found or Produce has no Token ID." });
     }
 
@@ -314,10 +343,9 @@ app.post('/api/orders/:orderId/confirm', async (req, res) => {
       include: { produce: true }
     });
 
-    if (!order || !order.produce.tokenId) {
+    if (!order || order.produce.tokenId === null || order.produce.tokenId === undefined) {
       return res.status(400).json({ error: "Order not found or missing Token ID." });
     }
-
     // 2. WEB 3 MAGIC: Call the smart contract to release funds
     console.log(`Releasing funds for Token ID: ${order.produce.tokenId} with Rating: ${rating}...`);
     
@@ -494,7 +522,11 @@ app.get('/api/ledger', async (req, res) => {
 // ---------------------------------------------------
 // START SERVER
 // ---------------------------------------------------
+// ---------------------------------------------------
+// START SERVER
+// ---------------------------------------------------
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(` Server is running on http://localhost:${PORT}`);
+// Add '0.0.0.0' right after PORT!
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Server is running and listening on all network interfaces on port ${PORT}!`);
 });
