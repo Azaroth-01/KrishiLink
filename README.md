@@ -3,7 +3,7 @@
 **KrishiLink** is a decentralized agricultural marketplace and escrow system designed to ensure fair trade between farmers and buyers. By leveraging smart contracts, we eliminate payment defaults and build trust in the agricultural supply chain.
 
 
-##Key Features
+## Key Features
 1.Agro-Escrow: Secure fund locking until produce delivery is verified.
 
 2.Profiles: Verified history of produce and successful trades.
@@ -43,3 +43,11 @@ The repository is organized into three main modules:
 cd contracts
 npm install --legacy-peer-deps
 npx hardhat compile
+
+### 3. Backend Setup
+cd backend
+npm install
+npx prisma generate
+# Update your .env with your DATABASE_URL
+npx prisma migrate dev
+npm start
