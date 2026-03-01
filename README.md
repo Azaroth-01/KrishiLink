@@ -32,22 +32,4 @@ The repository is organized into three main modules:
 
 ---
 
-## ⚙️ Getting Started
 
-### 1. Prerequisites
-* Node.js (v22.x recommended)
-* npm
-
-### 2. Smart Contract Setup
-```bash
-cd contracts
-npm install --legacy-peer-deps
-npx hardhat compile
-
-### 3. Backend Setup
-cd backend
-npm install
-npx prisma generate
-# Update your .env with your DATABASE_URL
-npx prisma migrate dev
-npm start
